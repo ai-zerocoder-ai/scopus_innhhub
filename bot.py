@@ -4,12 +4,12 @@ import schedule
 import time
 import hashlib
 import sqlite3
-
+import csv
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 import openai
 from dotenv import load_dotenv
+import re
 
 ##############################################
 # 1. Инициализация
@@ -29,7 +29,7 @@ openai.api_key = OPENAI_API_KEY
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # Подключение к базе данных
-conn = sqlite3.connect("articles.db", check_same_thread=False)
+conn = sqlite3.connect("s_articles.db", check_same_thread=False)
 cursor = conn.cursor()
 
 # Создаём таблицу, если не существует
@@ -47,16 +47,9 @@ CREATE TABLE IF NOT EXISTS published_articles (
 conn.commit()
 
 ##############################################
-# 2. Удаление HTML-тегов, например <inf>
+# 2. Удаление HTML-тегов (например <inf>)
 ##############################################
-import re
-
 def remove_html_tags(text: str) -> str:
-    """
-    Удаляем все HTML-теги, чтобы убрать <inf>, </inf> и т.п.
-    Превращает 'CO<inf>2</inf>' в 'CO2'.
-    """
-    # Простая регулярка: удаляем все теги <...>
     return re.sub(r"<[^>]*>", "", text or "")
 
 ##############################################
@@ -64,7 +57,7 @@ def remove_html_tags(text: str) -> str:
 ##############################################
 def search_scopus():
     """
-    Ищем новые статьи в Scopus по двум ключевым словам в заголовке:
+    Ищем новые статьи в Scopus по двум ключевым словам:
     hydrogen и ammonia. Берём последние 10 публикаций.
     """
     print("🔎 Проверка новых публикаций в Scopus...")
@@ -97,7 +90,7 @@ def search_scopus():
         pub_date = entry.get("prism:coverDate", "No Date")
         first_author = extract_first_author(entry)
 
-        # Удаляем HTML-теги из английского заголовка (например <inf>)
+        # Удаляем HTML-теги из английского заголовка
         eng_title_clean = remove_html_tags(eng_title)
 
         # Генерируем хэш (уникальный идентификатор)
@@ -144,8 +137,9 @@ def translate_title_openai(eng_title: str) -> str:
         return "Нет заголовка"
 
     try:
+        # ВНИМАНИЕ: если у вас нет gpt-4, используйте "gpt-3.5-turbo"
         completion = openai.chat.completions.create(
-            model="gpt-4o",  # При отсутствии GPT-4 можно заменить на "gpt-3.5-turbo"
+            model="gpt-4o",
             messages=[
                 {
                     "role": "system",
@@ -177,20 +171,22 @@ def send_to_telegram(rus_title, first_author, pub_date, doi):
     - инлайн-кнопка (Читать оригинал).
     """
     if doi == "No DOI":
-        doi_link = "Без DOI"
+        doi_link_markdown = "Без DOI"
+        doi_url = None
     else:
-        doi_link = f"[{doi}](https://doi.org/{doi})"
+        doi_link_markdown = f"[{doi}](https://doi.org/{doi})"
+        doi_url = f"https://doi.org/{doi}"
 
     message_text = (
         f"*{rus_title}*\n"
         f"Автор: {first_author}\n"
         f"Дата: {pub_date}\n"
-        f"DOI: {doi_link}"
+        f"DOI: {doi_link_markdown}"
     )
 
     markup = InlineKeyboardMarkup()
-    if doi != "No DOI":
-        markup.add(InlineKeyboardButton("Читать оригинал", url=f"https://doi.org/{doi}"))
+    if doi_url:
+        markup.add(InlineKeyboardButton("Читать оригинал", url=doi_url))
 
     try:
         bot.send_message(
@@ -204,9 +200,58 @@ def send_to_telegram(rus_title, first_author, pub_date, doi):
         print("❌ Ошибка при отправке в Telegram:", e)
 
 ##############################################
-# 6. Планировщик
+# 6. Выгрузка базы в CSV и отправка в Telegram
 ##############################################
-schedule.every(30).minutes.do(search_scopus)
+def export_db_to_csv():
+    """
+    Выгружаем всю таблицу published_articles в CSV-файл.
+    Добавляем колонку с ссылкой на оригинал (если DOI есть).
+    """
+    filename = "scopus_pub.csv"
+    with open(filename, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        # Заголовки столбцов
+        writer.writerow([
+            "ID", "Hash", "DOI", "English Title", "Russian Title",
+            "First Author", "Publication Date", "Original Link"
+        ])
+
+        cursor.execute("SELECT id, hash, doi, eng_title, rus_title, first_author, pub_date FROM published_articles")
+        rows = cursor.fetchall()
+        for row in rows:
+            id_, hash_, doi, eng_title, rus_title, first_author, pub_date = row
+            if doi != "No DOI":
+                original_link = f"https://doi.org/{doi}"
+            else:
+                original_link = "No link"
+
+            # Записываем всё в строку CSV, включая ссылку
+            writer.writerow([
+                id_, hash_, doi, eng_title, rus_title,
+                first_author, pub_date, original_link
+            ])
+    return filename
+
+def send_csv_to_telegram():
+    """
+    Экспортируем БД в CSV и отправляем файл в Telegram-группу.
+    """
+    filename = export_db_to_csv()
+    try:
+        with open(filename, "rb") as f:
+            bot.send_document(TELEGRAM_CHANNEL_ID, f, caption="Свод публикаций Scopus (CSV)")
+        print("✅ CSV-файл отправлен в Telegram!")
+    except Exception as e:
+        print("❌ Ошибка при отправке CSV-файла:", e)
+
+##############################################
+# 7. Планировщик
+##############################################
+# Поиск новых статей каждые 1 минуту (для теста)
+schedule.every(60).minutes.do(search_scopus)
+
+# Выгрузка БД (CSV) и отправка каждую субботу в 13:42
+schedule.every().saturday.at("09:00").do(send_csv_to_telegram)
 
 if __name__ == "__main__":
     print("🤖 Бот запущен. Ожидание нового контента...")
