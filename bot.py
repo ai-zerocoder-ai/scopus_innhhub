@@ -20,6 +20,7 @@ SCOPUS_API_KEY = os.getenv("SCOPUS_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TELEGRAM_THREAD_ID = os.getenv("TELEGRAM_THREAD_ID")
 
 if not SCOPUS_API_KEY or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID or not OPENAI_API_KEY:
     raise ValueError("Не все ключи найдены в .env! Проверьте SCOPUS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, OPENAI_API_KEY.")
@@ -193,7 +194,8 @@ def send_to_telegram(rus_title, first_author, pub_date, doi):
             chat_id=TELEGRAM_CHANNEL_ID,
             text=message_text,
             parse_mode="Markdown",
-            reply_markup=markup
+            reply_markup=markup,
+            message_thread_id=TELEGRAM_THREAD_ID
         )
         print(f"✅ Опубликовано: {rus_title}")
     except Exception as e:
@@ -239,7 +241,7 @@ def send_csv_to_telegram():
     filename = export_db_to_csv()
     try:
         with open(filename, "rb") as f:
-            bot.send_document(TELEGRAM_CHANNEL_ID, f, caption="Свод публикаций Scopus (CSV)")
+            bot.send_document(TELEGRAM_CHANNEL_ID, f, caption="Свод публикаций Scopus (CSV)", message_thread_id=TELEGRAM_THREAD_ID)
         print("✅ CSV-файл отправлен в Telegram!")
     except Exception as e:
         print("❌ Ошибка при отправке CSV-файла:", e)
@@ -248,10 +250,10 @@ def send_csv_to_telegram():
 # 7. Планировщик
 ##############################################
 # Поиск новых статей каждые 1 минуту (для теста)
-schedule.every(60).minutes.do(search_scopus)
+schedule.every(1).minutes.do(search_scopus)
 
 # Выгрузка БД (CSV) и отправка каждую субботу в 13:42
-schedule.every().saturday.at("09:00").do(send_csv_to_telegram)
+schedule.every().saturday.at("14:38").do(send_csv_to_telegram)
 
 if __name__ == "__main__":
     print("🤖 Бот запущен. Ожидание нового контента...")
